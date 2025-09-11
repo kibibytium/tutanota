@@ -326,6 +326,7 @@ impl Sdk {
 			contact_facade,
 			customer_facade,
 			asymmetric_crypto_facade: Arc::clone(&asymmetric_crypto_facade),
+			public_key_provider: Arc::clone(&public_key_provider),
 		}))
 	}
 
@@ -487,6 +488,7 @@ pub struct LoggedInSdk {
 	pub contact_facade: Arc<ContactFacade>,
 	pub customer_facade: Arc<CustomerFacade>,
 	pub asymmetric_crypto_facade: Arc<AsymmetricCryptoFacade>,
+	pub public_key_provider: Arc<PublicKeyProvider>,
 }
 
 impl LoggedInSdk {
