@@ -15,8 +15,8 @@ use crate::services::generated::sys::PublicKeyService;
 #[cfg_attr(test, mockall_double::double)]
 use crate::services::service_executor::ServiceExecutor;
 use crate::services::ExtraServiceParams;
-use crate::tutanota_constants::CryptoProtocolVersion;
 use crate::tutanota_constants::EncryptionAuthStatus;
+use crate::tutanota_constants::{CryptoProtocolVersion, PublicKeyIdentifierType};
 use crate::util::convert_version_to_u64;
 use crate::ApiCallError;
 use crate::GeneratedId;
@@ -229,6 +229,18 @@ impl AsymmetricCryptoFacade {
 			.load_key_pair(recipient_key_pair_group_id, recipient_key_version)
 			.await?;
 		Self::decrypt_sym_key_with_key_pair(key_pair, crypto_protocol_version, pub_enc_sym_key)
+	}
+	pub async fn load_recipient_pub_key(
+		&self,
+		recipient_address: &str,
+	) -> Result<Versioned<PublicKey>, PublicKeyLoadingError> {
+		let key_identifier = PublicKeyIdentifier {
+			identifier: recipient_address.to_string(),
+			identifier_type: PublicKeyIdentifierType::MailAddress,
+		};
+		self.public_key_provider
+			.load_current_pub_key(&key_identifier)
+			.await
 	}
 
 	/// Encrypts the symKey asymmetrically with the provided public keys.

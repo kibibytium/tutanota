@@ -1,23 +1,36 @@
+use crypto_primitives::key::GenericAesKey;
+
+use crate::crypto::asymmetric_crypto_facade::AsymmetricCryptoError;
+use crate::crypto::crypto_facade::CryptoFacade;
+use crate::crypto::public_key_provider::{PublicKeyIdentifier, PublicKeyLoadingError, PublicKeyProvider};
 #[cfg_attr(test, mockall_double::double)]
 use crate::crypto_entity_client::CryptoEntityClient;
 use crate::element_value::ParsedEntity;
 use crate::entities::generated::sys::{Group, GroupInfo};
 use crate::entities::generated::tutanota::{
-	Mail, MailBox, MailSet, MailboxGroupRoot, SimpleMoveMailPostIn, UnreadMailStatePostIn,
+	InternalRecipientKeyData, Mail, MailBox, MailSet, MailboxGroupRoot, SendDraftData,
+	SendDraftReturn, SimpleMoveMailPostIn, UnreadMailStatePostIn,
 };
 use crate::entities::Entity;
 use crate::folder_system::{FolderSystem, MailSetKind};
 use crate::groups::GroupType;
 use crate::id::id_tuple::IdTupleGenerated;
 use crate::rest_error::HttpError;
-use crate::services::generated::tutanota::{SimpleMoveMailService, UnreadMailStateService};
+use crate::services::generated::tutanota::{
+	SendDraftService, SimpleMoveMailService, UnreadMailStateService,
+};
 #[cfg_attr(test, mockall_double::double)]
 use crate::services::service_executor::ResolvingServiceExecutor;
+use crate::services::ExtraServiceParams;
+use crate::tutanota_constants::PublicKeyIdentifierType;
 #[cfg_attr(test, mockall_double::double)]
 use crate::user_facade::UserFacade;
 use crate::GeneratedId;
 use crate::{ApiCallError, ListLoadDirection};
 use std::sync::Arc;
+use ApiCallError::InternalSdkError;
+use crypto_primitives::versioned::Versioned;
+use crate::crypto::key::PublicKey;
 
 /// Provides high level functions to manipulate mail entities via the REST API
 #[derive(uniffi::Object)]
@@ -25,6 +38,8 @@ pub struct MailFacade {
 	crypto_entity_client: Arc<CryptoEntityClient>,
 	user_facade: Arc<UserFacade>,
 	service_executor: Arc<ResolvingServiceExecutor>,
+	crypto_facade: Arc<CryptoFacade>,
+	public_key_provider: Arc<PublicKeyProvider>,
 }
 
 impl MailFacade {
@@ -32,11 +47,15 @@ impl MailFacade {
 		crypto_entity_client: Arc<CryptoEntityClient>,
 		user_facade: Arc<UserFacade>,
 		service_executor: Arc<ResolvingServiceExecutor>,
+		crypto_facade: Arc<CryptoFacade>,
+		public_key_provider: Arc<PublicKeyProvider>,
 	) -> Self {
 		MailFacade {
 			crypto_entity_client,
 			user_facade,
 			service_executor,
+			crypto_facade,
+			public_key_provider,
 		}
 	}
 }
@@ -123,7 +142,6 @@ impl MailFacade {
 	}
 }
 
-#[uniffi::export]
 impl MailFacade {
 	/// Gets an untyped `Mail` instance from the backend
 	pub async fn load_untyped_mail(
@@ -218,6 +236,72 @@ impl MailFacade {
 	pub async fn trash_mails(&self, mails: Vec<IdTupleGenerated>) -> Result<(), ApiCallError> {
 		self.simple_move_mail(mails, MailSetKind::Trash).await
 	}
+
+	pub async fn send_draft(
+		&self,
+		mail: IdTupleGenerated,
+		mail_session_key: GenericAesKey,
+		bucket_key: GenericAesKey,
+		encrypted_mail_session_key: Vec<u8>,
+		recipient_address: &str,
+	) -> Result<SendDraftReturn, ApiCallError> {
+		let mut sk_if_external: Option<Vec<u8>> = None;
+		let mut bucket_enc_mail_session_key: Option<Vec<u8>> = None;
+		let group_id = self.user_facade.get_user_group_id();
+		let recipient_identifier = PublicKeyIdentifier {
+			identifier: recipient_address.to_string(),
+			identifier_type: PublicKeyIdentifierType::MailAddress,
+		};
+		let internal_recipient_key_data = match self
+			.public_key_provider
+			.load_current_pub_key(&recipient_identifier)
+			.await
+		{
+			Ok(key) => {
+				bucket_enc_mail_session_key = Some(encrypted_mail_session_key);
+				Some(self
+					.crypto_facade
+					.encrypt_bucket_key_for_internal_recipient(
+						group_id,
+						bucket_key,
+						recipient_address,
+						key,
+					)
+					.await.map_err(|e| ApiCallError::InternalSdkError {error_message: e.to_string()})?)
+			},
+			Err(e) => {
+				sk_if_external = Some(mail_session_key.get_inner());
+				None
+			},
+		};
+
+		let send_draft_data = SendDraftData {
+			_format: 0,
+			language: "en_gb".to_string(),
+			mailSessionKey: sk_if_external,
+			bucketEncMailSessionKey: bucket_enc_mail_session_key,
+			senderNameUnencrypted: None,
+			plaintext: false,
+			calendarMethod: false,
+			sessionEncEncryptionAuthStatus: None,
+			internalRecipientKeyData: internal_recipient_key_data.map(|d| vec![d]).unwrap_or(Vec::new()),
+			secureExternalRecipientKeyData: vec![],
+			attachmentKeyData: vec![],
+			mail,
+			symEncInternalRecipientKeyData: vec![],
+			sendAt: None,
+			allowUndo: false,
+			parameters: None,
+		};
+		self.service_executor
+			.post::<SendDraftService>(
+				send_draft_data,
+				ExtraServiceParams {
+					..Default::default()
+				},
+			)
+			.await
+	}
 }
 
 fn get_enabled_mail_addresses_for_group_info(group_info: &GroupInfo) -> Vec<String> {
@@ -246,6 +330,8 @@ mod tests {
 	use crate::IdTupleGenerated;
 	use mockall::predicate::{always, eq};
 	use std::sync::Arc;
+	use crate::crypto::crypto_facade::MockCryptoFacade;
+	use crate::crypto::public_key_provider::MockPublicKeyProvider;
 
 	#[tokio::test]
 	async fn mark_mail_split() {
@@ -277,6 +363,8 @@ mod tests {
 				Arc::new(MockCryptoEntityClient::default()),
 				Arc::new(MockUserFacade::default()),
 				Arc::new(executor),
+				Arc::new(MockCryptoFacade),
+				Arc::new(MockPublicKeyProvider)
 			);
 			facade
 				.set_unread_status_for_mails(mails, unread)
@@ -313,6 +401,8 @@ mod tests {
 				Arc::new(MockCryptoEntityClient::default()),
 				Arc::new(MockUserFacade::default()),
 				Arc::new(executor),
+				Arc::new(MockCryptoFacade),
+				Arc::new(MockPublicKeyProvider)
 			);
 			facade
 				.set_unread_status_for_mails(mails, unread)
@@ -341,6 +431,8 @@ mod tests {
 				Arc::new(MockCryptoEntityClient::default()),
 				Arc::new(MockUserFacade::default()),
 				Arc::new(executor),
+				Arc::new(MockCryptoFacade),
+				Arc::new(MockPublicKeyProvider)
 			);
 			facade
 				.set_unread_status_for_mails(mails, unread)
@@ -390,6 +482,8 @@ mod tests {
 			Arc::new(MockCryptoEntityClient::default()),
 			Arc::new(MockUserFacade::default()),
 			Arc::new(executor),
+			Arc::new(MockCryptoFacade),
+			Arc::new(MockPublicKeyProvider)
 		);
 		facade.trash_mails(mails).await.unwrap();
 	}
@@ -421,6 +515,8 @@ mod tests {
 			Arc::new(MockCryptoEntityClient::default()),
 			Arc::new(MockUserFacade::default()),
 			Arc::new(executor),
+			Arc::new(MockCryptoFacade),
+			Arc::new(MockPublicKeyProvider)
 		);
 		facade.trash_mails(mails).await.unwrap();
 	}
@@ -447,6 +543,8 @@ mod tests {
 			Arc::new(MockCryptoEntityClient::default()),
 			Arc::new(MockUserFacade::default()),
 			Arc::new(executor),
+			Arc::new(MockCryptoFacade),
+			Arc::new(MockPublicKeyProvider)
 		);
 		facade.trash_mails(mails).await.unwrap();
 	}

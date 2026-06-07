@@ -326,8 +326,8 @@ impl Sdk {
 			type_model_provider: Arc::clone(&self.type_model_provider),
 			contact_facade,
 			customer_facade,
-			asymmetric_crypto_facade: Arc::clone(&asymmetric_crypto_facade),
-			public_key_provider: Arc::clone(&public_key_provider),
+            public_key_provider: Arc::clone(&public_key_provider),
+            crypto_facade: Arc::clone(&crypto_facade),
 		}))
 	}
 
@@ -484,12 +484,12 @@ pub struct LoggedInSdk {
 	typed_entity_client: Arc<TypedEntityClient>,
 	crypto_entity_client: Arc<CryptoEntityClient>,
 	blob_facade: Arc<BlobFacade>,
+	crypto_facade: Arc<CryptoFacade>,
+    public_key_provider: Arc<PublicKeyProvider>,
 	pub instance_mapper: Arc<InstanceMapper>,
 	pub type_model_provider: Arc<TypeModelProvider>,
 	pub contact_facade: Arc<ContactFacade>,
 	pub customer_facade: Arc<CustomerFacade>,
-	pub asymmetric_crypto_facade: Arc<AsymmetricCryptoFacade>,
-	pub public_key_provider: Arc<PublicKeyProvider>,
 }
 
 impl LoggedInSdk {
@@ -586,6 +586,8 @@ impl LoggedInSdk {
 			self.crypto_entity_client.clone(),
 			self.user_facade.clone(),
 			self.service_executor.clone(),
+			self.crypto_facade.clone(),
+			self.public_key_provider.clone(),
 		)
 	}
 

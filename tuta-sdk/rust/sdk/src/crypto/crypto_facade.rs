@@ -1,7 +1,9 @@
 #[cfg_attr(test, mockall_double::double)]
 use crate::crypto::asymmetric_crypto_facade::AsymmetricCryptoFacade;
-use crate::crypto::asymmetric_crypto_facade::{AsymmetricCryptoError, DecapsulatedAesKey};
-use crate::crypto::key::KeyLoadError;
+use crate::crypto::asymmetric_crypto_facade::{
+	AsymmetricCryptoError, DecapsulatedAesKey, PubEncSymKey,
+};
+use crate::crypto::key::{KeyLoadError, PublicKey};
 use crate::crypto::rsa::RSAEncryptionError;
 use crate::crypto::tuta_crypt::TutaCryptError;
 use crate::crypto::x25519::X25519PublicKey;
@@ -12,6 +14,7 @@ use crate::entities::entity_facade::{
 	OWNER_KEY_VERSION_FIELD, PERMISSIONS_FIELD,
 };
 use crate::entities::generated::sys::{BucketKey, Permission};
+use crate::entities::generated::tutanota::InternalRecipientKeyData;
 use crate::entities::Entity;
 #[cfg_attr(test, mockall_double::double)]
 use crate::entity_client::EntityClient;
@@ -30,6 +33,7 @@ use base64::Engine;
 use crypto_primitives::aes::InitializationVector;
 use crypto_primitives::key::{GenericAesKey, KeyDecryptError};
 use crypto_primitives::randomizer_facade::RandomizerFacade;
+use crypto_primitives::versioned::Versioned;
 use num_enum::TryFromPrimitive;
 use std::sync::Arc;
 use util::array::ArrayCastingError;
@@ -357,6 +361,41 @@ impl CryptoFacade {
 			owner_enc_session_key,
 			owner_key_version: versioned_owner_group_key.version,
 			sender_identity_pub_key,
+		})
+	}
+	pub async fn encrypt_bucket_key_for_internal_recipient(
+		&self,
+		sender_group_id: GeneratedId,
+		bucket_key: GenericAesKey,
+		recipient_address: &str,
+		recipient_pub_key: Versioned<PublicKey>,
+	) -> Result<InternalRecipientKeyData, AsymmetricCryptoError> {
+		self.create_pub_enc_internal_recipient_key_data(
+			bucket_key,
+			recipient_address,
+			recipient_pub_key,
+			sender_group_id,
+		)
+		.await
+	}
+	async fn create_pub_enc_internal_recipient_key_data(
+		&self,
+		bucket_key: GenericAesKey,
+		recipient_address: &str,
+		recipient_public_keys: Versioned<PublicKey>,
+		sender_group_id: GeneratedId,
+	) -> Result<InternalRecipientKeyData, AsymmetricCryptoError> {
+		let pub_enc_bucket_key = self
+			.asymmetric_crypto_facade
+			.asym_encrypt_sym_key(bucket_key, recipient_public_keys, &sender_group_id)
+			.await?;
+		Ok(InternalRecipientKeyData {
+			_id: None,
+			mailAddress: recipient_address.to_string(),
+			pubEncBucketKey: pub_enc_bucket_key.pub_enc_sym_key_bytes,
+			recipientKeyVersion: pub_enc_bucket_key.recipient_key_version as i64,
+			protocolVersion: pub_enc_bucket_key.crypto_protocol_version as i64,
+			senderKeyVersion: pub_enc_bucket_key.sender_key_version.map(|v| v as i64),
 		})
 	}
 }
