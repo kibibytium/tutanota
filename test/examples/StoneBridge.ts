@@ -261,7 +261,7 @@ async function getMailFacade(base: BaseLocator) {
 	)
 }
 
-function startServer(onMessage) {
+function startServer(onMessage: (body: string) => Promise<SendMailReturn>) {
 	if (fs.existsSync(SOCKET_PATH)) {
 		fs.unlinkSync(SOCKET_PATH)
 	}
@@ -272,10 +272,10 @@ function startServer(onMessage) {
 			req.on("data", (chunk) => {
 				body += chunk.toString()
 			})
-			req.on("end", () => {
-				onMessage(body) // hand off the message to your handler
+			req.on("end", async () => {
+				let resp: SendMailReturn = await onMessage(body) // hand off the message to your handler
 				res.writeHead(200, { "Content-Type": "application/json" })
-				res.end(JSON.stringify({ status: "ok" }))
+				res.end(JSON.stringify(resp))
 			})
 		} else {
 			res.writeHead(200, { "Content-Type": "text/plain" })
@@ -298,7 +298,12 @@ function startServer(onMessage) {
 	return server
 }
 
-async function sendMail(mailFacade: MailFacade, msg: SocketMessage, config: Record<string, string>) {
+type SendMailReturn = {
+	messageId: string
+	recipient: string
+}
+
+async function sendMail(mailFacade: MailFacade, msg: SocketMessage, config: Record<string, string>): Promise<SendMailReturn> {
 	const r: PartialRecipient = {
 		address: msg.recipient,
 		name: "Waygates User",
@@ -327,7 +332,8 @@ async function sendMail(mailFacade: MailFacade, msg: SocketMessage, config: Reco
 		contact: null,
 		verificationState: PresentableKeyVerificationState.NONE,
 	}
-	await mailFacade.sendDraft(newMail, [recipient], "en", null, false)
+	let sendDraftReturn = await mailFacade.sendDraft(newMail, [recipient], "en", null, false)
+	return { messageId: sendDraftReturn.messageId, recipient: recipient.address }
 }
 function readConfig(filePath: string) {
 	const config: Record<string, string> = {}
@@ -359,9 +365,7 @@ async function run() {
 	startServer(async (newMessage: string) => {
 		// fire-and-forget async handling
 		const msg: SocketMessage = JSON.parse(newMessage)
-		await sendMail(mailFacade, msg, config).catch((err) => {
-			console.error("Error processing message:", err)
-		})
+		return await sendMail(mailFacade, msg, config)
 	})
 }
 
