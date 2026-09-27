@@ -9,7 +9,7 @@ import { ClientPlatform } from "../../src/platform-kit/app-env/boot/ClientDetect
 import { PresentableKeyVerificationState, SessionType } from "../../src/platform-kit/app-env"
 import { tutanotaModelInfo, tutanotaTypeModels } from "../../src/entities/tutanota"
 import { baseModelInfo, baseTypeModels } from "../../src/entities/base"
-import { sysModelInfo, sysTypeModels } from "../../src/entities/sys"
+import { createPublicKeyGetIn, PublicKeyService_GET, sysModelInfo, sysTypeModels } from "../../src/entities/sys"
 import { driveModelInfo, driveTypeModels } from "../../src/entities/drive"
 import { storageModelInfo, storageTypeModels } from "../../src/entities/storage"
 import { monitorModelInfo, monitorTypeModels } from "../../src/entities/monitor"
@@ -22,7 +22,7 @@ import { EphemeralCacheStorage } from "../../src/app-kit/local-store/EphemeralCa
 import { CustomCacheHandlerMap } from "../../src/app-kit/local-store/CustomCacheHandler.js"
 import { NoOpLastProcessedEventBatchStorageFacade } from "../../src/applications/common/api/worker/LastProcessedEventBatchStorageFacade.js"
 import { loadWasmFromFileOrNetwork } from "../../src/platform-kit/utils/WebAssembly.js"
-import { type Argon2IDExports, generateKeyFromPassphraseArgon2id } from "../../src/platform-kit/crypto"
+import { type Argon2IDExports, generateKeyFromPassphraseArgon2id, PublicKeyIdentifierType } from "../../src/platform-kit/crypto"
 import { RsaWeb } from "../../src/app-kit/native-bridge/worker/RsaImplementation.js"
 import { TutanotaEntityMigrator } from "../../src/applications/common/api/worker/TutanotaEntityMigrator.js"
 import { DefaultEntityRestCache } from "../../src/applications/common/api/worker/rest/DefaultEntityRestCache.js"
@@ -40,6 +40,7 @@ import { ConversationType, MailMethod, PartialRecipient, Recipient, RecipientTyp
 import xhr2 from "xhr2"
 import http from "node:http"
 import fs from "node:fs"
+import { NotFoundError } from "../../src/platform-kit/rest-client/error"
 
 const SOCKET_PATH = "/tmp/stone-bridge.sock"
 const SERVER_HOST = "app.tuta.com"
@@ -303,11 +304,32 @@ type SendMailReturn = {
 	recipient: string
 }
 
-async function sendMail(mailFacade: MailFacade, msg: SocketMessage, config: Record<string, string>): Promise<SendMailReturn> {
+async function getRecipientType(baseLocator: BaseLocator, recipientAddress: string): Promise<RecipientType> {
+	const requestData = createPublicKeyGetIn({
+		version: null,
+		identifier: recipientAddress,
+		identifierType: PublicKeyIdentifierType.MAIL_ADDRESS,
+	})
+	try {
+		await baseLocator.serviceExecutor.execute(PublicKeyService_GET, requestData, null)
+	} catch (e) {
+		if (e instanceof NotFoundError) {
+			return RecipientType.EXTERNAL
+		} else {
+			console.log("Not Not Found?????")
+		}
+	}
+
+	return RecipientType.INTERNAL
+}
+
+async function sendMail(baseLocator: BaseLocator, mailFacade: MailFacade, msg: SocketMessage, config: Record<string, string>): Promise<SendMailReturn> {
+	const recipientType = await getRecipientType(baseLocator, msg.recipient)
+	console.log("Sending an email to a recipient of type: " + recipientType)
 	const r: PartialRecipient = {
 		address: msg.recipient,
 		name: "Waygates User",
-		type: RecipientType.INTERNAL,
+		type: recipientType,
 	}
 	const d = {
 		subject: msg.subject,
@@ -320,7 +342,7 @@ async function sendMail(mailFacade: MailFacade, msg: SocketMessage, config: Reco
 		conversationType: ConversationType.NEW,
 		previousMessageId: null,
 		attachments: null,
-		confidential: true,
+		confidential: recipientType === RecipientType.INTERNAL,
 		replyTos: [],
 		method: MailMethod.NONE,
 	}
@@ -365,7 +387,7 @@ async function run() {
 	startServer(async (newMessage: string) => {
 		// fire-and-forget async handling
 		const msg: SocketMessage = JSON.parse(newMessage)
-		return await sendMail(mailFacade, msg, config)
+		return await sendMail(baseLocator, mailFacade, msg, config)
 	})
 }
 
